@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>北京地铁韧性动态监测系统</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1>北京地铁韧性动态监测系统</h1>
+    <div class="actions">
+      <div id="playbackTime" style="color:#eef5ff;font-weight:600;margin-right:10px;">
+        回放时间：--
+      </div>
+      <button id="cleanBtn">数据清洗+训练</button>
+      <button id="refreshBtn">下一时刻</button>
+      <button id="pausePlayBtn">暂停</button> <!-- 新增的暂停/播放按钮 -->
+      <button id="windBtn">大风模式：关</button>
+      <select id="modelSelect">
+        <option value="lightgbm">LightGBM</option>
+        <option value="xgboost">XGBoost</option>
+        <option value="baseline">Baseline</option>
+      </select>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="panel">
+      <h3>关键指标</h3>
+      <div id="kpis"></div>
+
+      <h3>说明</h3>
+      <div class="card small">
+        当前系统基于北京历史 OD 数据进行 10 分钟粒度动态回放。<br>
+        当前客流为真实清洗数据，预测客流为模型输出，级联结果体现为拥堵在邻接站点间的传播。<br>
+        自动刷新每 5 秒推进一个 10 分钟时间片；点击“下一时刻”可手动跳到下一个时间片。
+      </div>
+    </aside>
+
+    <section class="center">
+      <div id="map"></div>
+    </section>
+
+    <aside class="panel">
+      <h3>高风险站点</h3>
+      <div id="riskList"></div>
+
+      <h3>级联结果</h3>
+      <div id="cascadeBox"></div>
+    </aside>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
