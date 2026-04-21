@@ -86,7 +86,7 @@ def train_realtime_model(ts: pd.DataFrame, model_name: str = "lightgbm", train_d
     }
 
 
-def build_realtime_snapshot(master: pd.DataFrame, ts: pd.DataFrame, prediction_bundle: dict, adjacency: dict, step: int):
+def build_realtime_snapshot(master: pd.DataFrame, ts: pd.DataFrame, prediction_bundle: dict, adjacency: dict, step: int, wind_mode: bool = False):
     pred_df = prediction_bundle["predictions"]
     playback_date = prediction_bundle["playback_date"]
 
@@ -130,7 +130,11 @@ def build_realtime_snapshot(master: pd.DataFrame, ts: pd.DataFrame, prediction_b
     cur["capacity_base"] = cur["capacity_base"].fillna(cur["total_flow"].replace(0, 1))
     cur["load_ratio"] = cur["predicted_flow"] / cur["capacity_base"].replace(0, 1)
 
-    base_over = dict(zip(cur["station_key"], np.maximum(cur["load_ratio"] - 0.85, 0)))
+    # 大风模式：降低过载门槛（更容易触发级联）并增大传播系数
+    overload_threshold = 0.70 if wind_mode else 0.85
+    wind_exposed_set = set(cur.loc[cur["wind_exposed"] == True, "station_key"]) if wind_mode else set()
+
+    base_over = dict(zip(cur["station_key"], np.maximum(cur["load_ratio"] - overload_threshold, 0)))
     cascade_add = {k: 0.0 for k in cur["station_key"]}
     waves = []
     source_station = max(base_over, key=lambda x: base_over[x]) if base_over else None
@@ -138,12 +142,17 @@ def build_realtime_snapshot(master: pd.DataFrame, ts: pd.DataFrame, prediction_b
     frontier = [(k, v) for k, v in base_over.items() if v > 0]
     visited = set(k for k, _ in frontier)
 
+    # 大风模式下传播系数更高（风暴露站点额外 +20%）
+    base_coeffs = (0.70, 0.50, 0.35) if wind_mode else (0.55, 0.35, 0.20)
+
     for wave_idx in range(1, 4):
         next_frontier = []
         wave_nodes = []
+        coeff = base_coeffs[wave_idx - 1]
         for node, overload in frontier:
             for nb in adjacency.get(node, []):
-                transmit = overload * (0.55 if wave_idx == 1 else 0.35 if wave_idx == 2 else 0.20)
+                wind_boost = 1.2 if (nb in wind_exposed_set) else 1.0
+                transmit = overload * coeff * wind_boost
                 if transmit <= 0:
                     continue
                 cascade_add[nb] = cascade_add.get(nb, 0.0) + transmit

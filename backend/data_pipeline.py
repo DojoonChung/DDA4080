@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from collections import defaultdict
 
@@ -9,6 +10,7 @@ from .config import (
     BASE_DIR, DATA_DIR, RAW_OD_GLOB, STATION_INFO_XLSX, MAP_SEQ_XLSX,
     CLEANED_GEO_CSV, STATION_GEO_TXT, CACHE_DIR, TIME_BIN_MINUTES,
     MIN_TRAVEL_MINUTES, MAX_TRAVEL_MINUTES, WIND_EXPOSED_LINES, LINE_COLORS,
+    KNOWN_STATION_ORDER,
 )
 from .utils import normalize_station_name, safe_read_csv, safe_read_excel
 
@@ -233,20 +235,150 @@ def build_master_station_table() -> pd.DataFrame:
     return master
 
 
+# ---------- 地理排序工具 ----------
+
+LOOP_LINES = {"2号线", "10号线"}
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Haversine distance in km."""
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2)
+    return R * 2 * math.asin(math.sqrt(a))
+
+
+def _geo_sort_stations(sub: pd.DataFrame, is_loop: bool = False) -> pd.DataFrame:
+    """用最近邻链对站点重排序，保证线路几何连续。
+
+    1. 找距离最远的一对站点作为线路两端（直径端点）。
+    2. 分别从两个端点出发做贪心最近邻，选 max_gap 更小的结果。
+    3. 环线从最北站出发。
+    """
+    if len(sub) <= 2:
+        sub = sub.copy()
+        sub["display_order"] = range(1, len(sub) + 1)
+        return sub
+
+    rows = sub.to_dict("records")
+
+    if is_loop:
+        start_candidates = [max(range(len(rows)), key=lambda i: rows[i]["纬度"])]
+    else:
+        # 找距离最远的两个站点
+        best_dist = -1
+        best_pair = (0, 1)
+        for i in range(len(rows)):
+            for j in range(i + 1, len(rows)):
+                d = _haversine_km(rows[i]["纬度"], rows[i]["经度"],
+                                  rows[j]["纬度"], rows[j]["经度"])
+                if d > best_dist:
+                    best_dist = d
+                    best_pair = (i, j)
+        start_candidates = list(best_pair)
+
+    def _greedy_chain(all_rows, start_idx):
+        pool = list(all_rows)
+        ordered = [pool.pop(start_idx)]
+        while pool:
+            last = ordered[-1]
+            best_i = min(range(len(pool)),
+                         key=lambda i: _haversine_km(last["纬度"], last["经度"],
+                                                     pool[i]["纬度"], pool[i]["经度"]))
+            ordered.append(pool.pop(best_i))
+        return ordered
+
+    def _max_gap(chain):
+        if len(chain) <= 1:
+            return 0
+        return max(
+            _haversine_km(chain[i]["纬度"], chain[i]["经度"],
+                          chain[i + 1]["纬度"], chain[i + 1]["经度"])
+            for i in range(len(chain) - 1)
+        )
+
+    # 尝试每个候选起点，选 max_gap 最小的
+    best_chain = None
+    best_gap = float("inf")
+    for idx in start_candidates:
+        chain = _greedy_chain(rows, idx)
+        gap = _max_gap(chain)
+        if gap < best_gap:
+            best_gap = gap
+            best_chain = chain
+
+    result = pd.DataFrame(best_chain)
+    result["display_order"] = range(1, len(result) + 1)
+    return result
+
+
+def _sort_by_known_order(sub: pd.DataFrame, known_names: list) -> pd.DataFrame:
+    """按权威站名顺序排序 DataFrame，匹配不上的站点追加到末尾。"""
+    order_map = {}
+    for i, name in enumerate(known_names):
+        key = normalize_station_name(name)
+        order_map[key] = i
+
+    sub = sub.copy()
+    sub["_known_order"] = sub["站点名称"].map(order_map)
+    matched = sub[sub["_known_order"].notna()].sort_values("_known_order")
+    unmatched = sub[sub["_known_order"].isna()]
+    result = pd.concat([matched, unmatched], ignore_index=True)
+    result["display_order"] = range(1, len(result) + 1)
+    result = result.drop(columns=["_known_order"], errors="ignore")
+    return result
+
+
+def _resolve_line_order(line: str, sub: pd.DataFrame) -> list:
+    """返回 [(seg_name, sorted_df, is_loop)] 列表。
+
+    优先用 KNOWN_STATION_ORDER；14号线拆成东西两段。
+    """
+    is_loop = line in LOOP_LINES
+
+    # 14号线：拆成东西两段
+    if line == "14号线":
+        segments = []
+        for seg_key, seg_name in [("14号线西段", "14号线(西段)"), ("14号线东段", "14号线(东段)")]:
+            known = KNOWN_STATION_ORDER.get(seg_key)
+            if known:
+                known_set = {normalize_station_name(n) for n in known}
+                seg_sub = sub[sub["站点名称"].isin(known_set)].copy()
+                if not seg_sub.empty:
+                    seg_df = _sort_by_known_order(seg_sub, known)
+                    segments.append((seg_name, seg_df, False))
+        if segments:
+            return segments
+        return [(line, _geo_sort_stations(sub), False)]
+
+    # 其他线路：查权威站序
+    known = KNOWN_STATION_ORDER.get(line)
+    if known:
+        sorted_df = _sort_by_known_order(sub, known)
+        return [(line, sorted_df, is_loop)]
+
+    # 兜底：geo-sort
+    return [(line, _geo_sort_stations(sub, is_loop), is_loop)]
+
+
 def build_adjacency(master: pd.DataFrame) -> dict:
     adj = defaultdict(set)
     if master is None or master.empty:
         return {}
     tmp = master.copy()
-    if "display_order" not in tmp.columns:
-        tmp["display_order"] = tmp["map_seq_id"].fillna(tmp["line_order"])
-    tmp = tmp.dropna(subset=["线路名称", "站点名称"])
+    tmp = tmp.dropna(subset=["线路名称", "站点名称", "经度", "纬度"])
     for line, sub in tmp.groupby("线路名称"):
-        sub = sub.sort_values("display_order")
-        stations = sub["station_key"].tolist()
-        for a, b in zip(stations[:-1], stations[1:]):
-            adj[a].add(b)
-            adj[b].add(a)
+        sub = sub.drop_duplicates(subset=["站点名称"])
+        for seg_name, seg_df, is_loop in _resolve_line_order(line, sub):
+            stations = seg_df["station_key"].tolist()
+            for a, b in zip(stations[:-1], stations[1:]):
+                adj[a].add(b)
+                adj[b].add(a)
+            if is_loop and len(stations) >= 3:
+                adj[stations[-1]].add(stations[0])
+                adj[stations[0]].add(stations[-1])
     return {k: sorted(v) for k, v in adj.items()}
 
 
@@ -254,19 +386,18 @@ def build_line_geometries(master: pd.DataFrame) -> list:
     if master is None or master.empty:
         return []
     tmp = master.copy()
-    if "display_order" not in tmp.columns:
-        tmp["display_order"] = tmp["map_seq_id"].fillna(tmp["line_order"])
     tmp = tmp.dropna(subset=["线路名称", "站点名称", "经度", "纬度"])
     out = []
     for line, sub in tmp.groupby("线路名称"):
-        sub = sub.sort_values("display_order").drop_duplicates(subset=["站点名称"])
-        out.append({
-            "line_name": line,
-            "color": LINE_COLORS.get(normalize_line_name(line), "#6ea8ff"),
-            "stations": sub[["站点名称", "经度", "纬度", "display_order"]]
-                .rename(columns={"站点名称": "station_name", "经度": "lon", "纬度": "lat"})
-                .to_dict("records"),
-        })
+        sub = sub.drop_duplicates(subset=["站点名称"])
+        color = LINE_COLORS.get(normalize_line_name(line), "#6ea8ff")
+        for seg_name, seg_df, is_loop in _resolve_line_order(line, sub):
+            stations_data = seg_df[["站点名称", "经度", "纬度", "display_order"]].rename(
+                columns={"站点名称": "station_name", "经度": "lon", "纬度": "lat"}
+            ).to_dict("records")
+            if is_loop and len(stations_data) >= 3:
+                stations_data.append(stations_data[0])
+            out.append({"line_name": seg_name, "color": color, "stations": stations_data})
     return out
 
 

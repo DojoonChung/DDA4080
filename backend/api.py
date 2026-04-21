@@ -8,6 +8,7 @@ from .config import BASE_DIR
 from .utils import records, safe_json_value
 from .data_pipeline import clean_raw_od, build_adjacency, build_line_geometries
 from .predictor import train_realtime_model, build_realtime_snapshot
+from .cascade import run_cascade
 
 app = FastAPI(title="Beijing Metro Realtime Resilience API")
 app.add_middleware(
@@ -91,7 +92,8 @@ def api_live(step: int = 0, model: str = "lightgbm", wind_mode: bool = False):
 
     model_bundle = APP_STATE["models"].get(model) or APP_STATE["models"]["lightgbm"]
     snap_bundle = build_realtime_snapshot(
-        APP_STATE["master"], APP_STATE["ts"], model_bundle, APP_STATE["adjacency"], step
+        APP_STATE["master"], APP_STATE["ts"], model_bundle, APP_STATE["adjacency"], step,
+        wind_mode=wind_mode,
     )
     snap = snap_bundle["snapshot"].copy()
 
@@ -148,3 +150,61 @@ def api_live(step: int = 0, model: str = "lightgbm", wind_mode: bool = False):
         },
     }
     return safe_json_value(payload)
+
+
+# ---------- 独立级联 what-if 分析 ----------
+@app.get("/api/cascade")
+def api_cascade(source: str = "", wind_mode: bool = False):
+    """BFS 级联传播模拟：指定源站点计算故障波及影响。"""
+    ensure_bootstrap()
+    result = run_cascade(
+        APP_STATE["master"],
+        APP_STATE["ts"],
+        source_station_key=source or None,
+        wind_mode=wind_mode,
+    )
+    return safe_json_value(result)
+
+
+# ---------- 站点元数据覆盖率 ----------
+@app.get("/api/coverage")
+def api_coverage():
+    """返回站点元数据覆盖率报告，用于数据质量监控。"""
+    ensure_bootstrap()
+    master = APP_STATE["master"]
+    total = len(master)
+    has_geo = int(master["经度"].notna().sum()) if "经度" in master.columns else 0
+    has_line = int((master["线路名称"].notna() & (master["线路名称"] != "")).sum()) if "线路名称" in master.columns else 0
+    has_code = int(master["raw_station_id"].notna().sum()) if "raw_station_id" in master.columns else 0
+    ts = APP_STATE["ts"]
+    ts_stations = int(ts["station_key"].nunique()) if ts is not None and "station_key" in ts.columns else 0
+    ts_matched_geo = 0
+    if ts is not None and "station_name" in ts.columns:
+        ts_matched_geo = int(ts["lon"].notna().sum()) if "lon" in ts.columns else 0
+    return safe_json_value({
+        "master_total": total,
+        "has_geo": has_geo,
+        "geo_rate": round(has_geo / max(total, 1), 4),
+        "has_line": has_line,
+        "line_rate": round(has_line / max(total, 1), 4),
+        "has_station_code": has_code,
+        "code_rate": round(has_code / max(total, 1), 4),
+        "timeseries_station_count": ts_stations,
+        "timeseries_geo_matched": ts_matched_geo,
+    })
+
+
+# ---------- Bootstrap 状态查询 ----------
+@app.get("/api/bootstrap_status")
+def api_bootstrap_status():
+    """查询数据清洗/训练是否已完成。"""
+    if not APP_STATE["bootstrapped"]:
+        return {"ready": False, "message": "数据尚未初始化，请先调用 POST /api/bootstrap"}
+    model_names = list(APP_STATE["models"].keys())
+    station_count = len(APP_STATE["master"]) if APP_STATE["master"] is not None else 0
+    return safe_json_value({
+        "ready": True,
+        "models": model_names,
+        "station_count": station_count,
+        "line_count": len(APP_STATE["line_geometries"]) if APP_STATE["line_geometries"] else 0,
+    })

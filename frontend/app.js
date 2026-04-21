@@ -1,7 +1,7 @@
 let windMode = false;
 let tick = 0;
-let timer = null; // 用于存储 setInterval 的引用
-let isPaused = false; // 新增：播放/暂停状态
+let timer = null;
+let mapInited = false;
 
 async function fetchJSON(url, options = {}) {
   const res = await fetch(url, options);
@@ -33,31 +33,6 @@ function formatPlaybackTime(data) {
   return `${data.date} ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 }
 
-// 新增：启动自动刷新的函数
-function startAutoRefresh() {
-  if (timer) clearInterval(timer); // 先清除任何现有的计时器
-  timer = setInterval(async () => {
-    tick += 1;
-    await refresh();
-  }, 5000); // 刷新频率，单位毫秒
-}
-
-// 新增：停止自动刷新的函数
-function stopAutoRefresh() {
-  if (timer) {
-    clearInterval(timer);
-    timer = null;
-  }
-}
-
-// 新增：更新暂停/播放按钮文本的函数
-function updatePausePlayButtonText() {
-  const pausePlayBtn = document.getElementById("pausePlayBtn");
-  if (pausePlayBtn) {
-    pausePlayBtn.textContent = isPaused ? "播放" : "暂停";
-  }
-}
-
 async function bootstrapAndRefresh() {
   const kpisEl = document.getElementById("kpis");
   if (kpisEl) {
@@ -66,14 +41,15 @@ async function bootstrapAndRefresh() {
 
   await fetchJSON("/api/bootstrap", { method: "POST" });
 
-  tick = 0; // 启动时重置时间片计数
-  await refresh(); // 立即刷新一次
+  tick = 0;
+  mapInited = false;
+  await refresh();
 
-  // 只有在非暂停状态下才启动自动刷新
-  if (!isPaused) {
-    startAutoRefresh();
-  }
-  updatePausePlayButtonText(); // 确保按钮文本初始状态正确
+  if (timer) clearInterval(timer);
+  timer = setInterval(async () => {
+    tick += 1;
+    await refresh();
+  }, 5000);
 }
 
 async function refresh() {
@@ -105,7 +81,7 @@ function render(data) {
       mode: "lines",
       lon: rows.map(r => r.lon),
       lat: rows.map(r => r.lat),
-      line: { width: 4, color: line.color || "#6ea8ff" }, // 线路颜色
+      line: { width: 4, color: line.color || "#6ea8ff" },
       hoverinfo: "skip",
       showlegend: false
     });
@@ -159,7 +135,7 @@ function render(data) {
     });
   }
 
-  Plotly.newPlot("map", traces, {
+  const mapLayout = {
     mapbox: {
       style: "carto-darkmatter",
       center: { lon: 116.39, lat: 39.92 },
@@ -169,7 +145,14 @@ function render(data) {
     plot_bgcolor: "#0b1628",
     font: { color: "#eef5ff" },
     margin: { l: 0, r: 0, t: 20, b: 0 }
-  }, { responsive: true });
+  };
+
+  if (!mapInited) {
+    Plotly.newPlot("map", traces, mapLayout, { responsive: true });
+    mapInited = true;
+  } else {
+    Plotly.react("map", traces, mapLayout);
+  }
 
   const kpisEl = document.getElementById("kpis");
   if (kpisEl) {
@@ -223,32 +206,11 @@ if (refreshBtn) {
   });
 }
 
-// 新增：暂停/播放按钮的事件监听器
-const pausePlayBtn = document.getElementById("pausePlayBtn");
-if (pausePlayBtn) {
-  pausePlayBtn.addEventListener("click", () => {
-    isPaused = !isPaused; // 切换暂停状态
-    updatePausePlayButtonText(); // 更新按钮文本
-
-    if (isPaused) {
-      stopAutoRefresh(); // 暂停时停止自动刷新
-    } else {
-      startAutoRefresh(); // 播放时重新启动自动刷新（从当前 tick 继续）
-    }
-  });
-}
-
 const modelSelect = document.getElementById("modelSelect");
 if (modelSelect) {
   modelSelect.addEventListener("change", async () => {
-    tick = 0; // 切换模型时重置时间片计数
-    await refresh(); // 立即刷新一次
-
-    // 如果非暂停状态，则停止当前计时器并重新启动，以确保从新的 tick=0 开始自动刷新
-    if (!isPaused) {
-      stopAutoRefresh();
-      startAutoRefresh();
-    }
+    tick = 0;
+    await refresh();
   });
 }
 
