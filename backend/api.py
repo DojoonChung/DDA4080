@@ -9,6 +9,12 @@ from .utils import records, safe_json_value
 from .data_pipeline import clean_raw_od, build_adjacency, build_line_geometries
 from .predictor import train_realtime_model, build_realtime_snapshot
 from .cascade import run_cascade
+from .plot_metrics import (
+    build_alerts,
+    build_plot_kpis,
+    build_plot_series,
+    build_status_distribution,
+)
 
 app = FastAPI(title="Beijing Metro Realtime Resilience API")
 app.add_middleware(
@@ -110,6 +116,10 @@ def api_live(step: int = 0, model: str = "lightgbm", wind_mode: bool = False):
         snap["status"] = "normal"
     if "wind_exposed" not in snap.columns:
         snap["wind_exposed"] = False
+    if "station_name" not in snap.columns and "station_key" in snap.columns:
+        snap["station_name"] = snap["station_key"]
+    if "line_name" not in snap.columns:
+        snap["line_name"] = ""
 
     failed = snap[snap["status"] == "fault"][["station_key", "station_name", "line_name", "lon", "lat"]]
     impacted = snap[snap["status"].isin(["fault", "crowded", "vulnerable"])][["station_key", "station_name", "line_name", "lon", "lat"]]
@@ -117,12 +127,28 @@ def api_live(step: int = 0, model: str = "lightgbm", wind_mode: bool = False):
 
     risk_cols = [c for c in ["station_key", "station_name", "line_name", "total_flow", "predicted_flow", "cascade_flow", "status"] if c in snap.columns]
     risk_top = snap.sort_values("cascade_flow", ascending=False).head(10)[risk_cols]
+    playback_time = f'{snap_bundle["playback_date"]} {4 + snap_bundle["slot"] // 6:02d}:{(snap_bundle["slot"] % 6) * 10:02d}'
+    kpis = build_plot_kpis(
+        snap=snap,
+        line_count=len(APP_STATE["line_geometries"]),
+    )
+    status_distribution = build_status_distribution(snap)
+    plot_series = build_plot_series(
+        snap=snap,
+        playback_time=playback_time,
+        kpis=kpis,
+    )
+    alerts = build_alerts(
+        snap=snap,
+        cascade_info=snap_bundle["cascade_info"],
+        top_n=5,
+    )
 
     payload = {
         "tick": step,
         "date": snap_bundle["playback_date"],
         "slot": snap_bundle["slot"],
-        "playback_time": f'{snap_bundle["playback_date"]} {4 + snap_bundle["slot"] // 6:02d}:{(snap_bundle["slot"] % 6) * 10:02d}',
+        "playback_time": playback_time,
         "line_geometries": APP_STATE["line_geometries"],
         "current": records(snap),
         "risk_top": records(risk_top),
@@ -141,13 +167,10 @@ def api_live(step: int = 0, model: str = "lightgbm", wind_mode: bool = False):
             "waves": safe_json_value(snap_bundle["cascade_info"]["waves"]),
         },
         "wind_markers": records(wind_markers),
-        "kpis": {
-            "station_count": int(snap["station_key"].nunique()) if "station_key" in snap.columns else 0,
-            "line_count": int(len(APP_STATE["line_geometries"])),
-            "crowded_count": int((snap["status"] == "crowded").sum()),
-            "fault_count": int((snap["status"] == "fault").sum()),
-            "avg_display_flow": float(snap["display_flow"].mean()) if len(snap) else 0.0,
-        },
+        "kpis": safe_json_value(kpis),
+        "status_distribution": safe_json_value(status_distribution),
+        "plot_series": safe_json_value(plot_series),
+        "alerts": safe_json_value(alerts),
     }
     return safe_json_value(payload)
 
