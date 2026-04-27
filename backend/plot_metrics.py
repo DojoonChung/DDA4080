@@ -3,20 +3,20 @@ from __future__ import annotations
 import pandas as pd
 
 
-def _safe_int(v, default=0):
+def _safe_int(value, default: int = 0) -> int:
     try:
-        if pd.isna(v):
+        if pd.isna(value):
             return default
-        return int(v)
+        return int(value)
     except Exception:
         return default
 
 
-def _safe_float(v, default=0.0):
+def _safe_float(value, default: float = 0.0) -> float:
     try:
-        if pd.isna(v):
+        if pd.isna(value):
             return default
-        return float(v)
+        return float(value)
     except Exception:
         return default
 
@@ -27,10 +27,6 @@ def calc_connectivity_index(
     crowded_count: int,
     vulnerable_count: int,
 ) -> float:
-    """
-    面向可视化的连通指数（0~100）
-    不是严格图论连通率，而是用于监控大屏展示的综合运行健康度。
-    """
     if station_count <= 0:
         return 0.0
 
@@ -40,8 +36,7 @@ def calc_connectivity_index(
         - crowded_count * 0.35
         - vulnerable_count * 0.15
     )
-    score = max(0.0, min(100.0, score))
-    return round(score, 1)
+    return round(max(0.0, min(100.0, score)), 1)
 
 
 def build_status_distribution(snap: pd.DataFrame) -> dict:
@@ -112,10 +107,6 @@ def build_plot_series(
     playback_time: str,
     kpis: dict,
 ) -> dict:
-    """
-    给前端 plot 用的单帧摘要。
-    当前版本前端会自己累计 history，但后端也输出结构化数据，方便后续扩展。
-    """
     return {
         "time_label": playback_time,
         "connectivity_index": _safe_float(kpis.get("connectivity_index")),
@@ -144,53 +135,51 @@ def build_alerts(
         if not fault_df.empty:
             fault_df = fault_df.sort_values(
                 ["cascade_flow", "predicted_flow", "total_flow"],
-                ascending=False
+                ascending=False,
             )
-            for _, r in fault_df.head(top_n).iterrows():
+            for _, row in fault_df.head(top_n).iterrows():
+                station_name = row.get("station_name", "-")
                 alerts.append({
                     "type": "fault",
                     "level": "high",
-                    "station_key": r.get("station_key"),
-                    "station_name": r.get("station_name"),
-                    "line_name": r.get("line_name"),
-                    "current_flow": _safe_int(r.get("total_flow")),
-                    "predicted_flow": _safe_int(r.get("predicted_flow")),
-                    "cascade_flow": _safe_int(r.get("cascade_flow")),
-                    "message": f"{r.get('station_name', '-') }发生严重拥堵/失效风险",
+                    "station_key": row.get("station_key"),
+                    "station_name": station_name,
+                    "line_name": row.get("line_name"),
+                    "current_flow": _safe_int(row.get("total_flow")),
+                    "predicted_flow": _safe_int(row.get("predicted_flow")),
+                    "cascade_flow": _safe_int(row.get("cascade_flow")),
+                    "message": f"{station_name} has severe congestion risk",
                 })
 
-    crowded_df = pd.DataFrame()
-    if "status" in snap.columns:
         crowded_df = snap[snap["status"] == "crowded"].copy()
-
-    if not crowded_df.empty:
-        crowded_df = crowded_df.sort_values(
-            ["cascade_flow", "predicted_flow", "total_flow"],
-            ascending=False
-        )
-        for _, r in crowded_df.head(max(0, top_n - len(alerts))).iterrows():
-            alerts.append({
-                "type": "crowded",
-                "level": "medium",
-                "station_key": r.get("station_key"),
-                "station_name": r.get("station_name"),
-                "line_name": r.get("line_name"),
-                "current_flow": _safe_int(r.get("total_flow")),
-                "predicted_flow": _safe_int(r.get("predicted_flow")),
-                "cascade_flow": _safe_int(r.get("cascade_flow")),
-                "message": f"{r.get('station_name', '-') }处于高拥堵状态",
-            })
+        if not crowded_df.empty:
+            crowded_df = crowded_df.sort_values(
+                ["cascade_flow", "predicted_flow", "total_flow"],
+                ascending=False,
+            )
+            for _, row in crowded_df.head(max(0, top_n - len(alerts))).iterrows():
+                station_name = row.get("station_name", "-")
+                alerts.append({
+                    "type": "crowded",
+                    "level": "medium",
+                    "station_key": row.get("station_key"),
+                    "station_name": station_name,
+                    "line_name": row.get("line_name"),
+                    "current_flow": _safe_int(row.get("total_flow")),
+                    "predicted_flow": _safe_int(row.get("predicted_flow")),
+                    "cascade_flow": _safe_int(row.get("cascade_flow")),
+                    "message": f"{station_name} is crowded",
+                })
 
     if cascade_info:
-        waves = cascade_info.get("waves", []) or []
-        for w in waves[:2]:
+        for wave in (cascade_info.get("waves", []) or [])[:2]:
             alerts.append({
                 "type": "cascade_wave",
                 "level": "medium",
-                "wave": _safe_int(w.get("wave")),
-                "station_count": len(w.get("stations", []) or []),
-                "stations": w.get("stations", []) or [],
-                "message": f"第 {w.get('wave', '-') } 波级联传播已触发",
+                "wave": _safe_int(wave.get("wave")),
+                "station_count": len(wave.get("stations", []) or []),
+                "stations": wave.get("stations", []) or [],
+                "message": f"Cascade wave {wave.get('wave', '-') } triggered",
             })
 
     return alerts[:top_n + 2]

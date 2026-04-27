@@ -1,7 +1,5 @@
 __pycache__/
 *.pyc
 
-DDA4080-main/cache/
-DDA4080-main/data/sim_od_*.csv
-DDA4080-main/data/cleaned_subway_data.csv
-DDA4080-main/data/station.csv
+cache/
+data/sim_od_*.csv
